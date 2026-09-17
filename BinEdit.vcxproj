@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Native x64 Win32 application. Both configurations intentionally use MSVC v145. -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>18.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{9D2AF187-37AD-4AB0-8904-B2B7B34E89C6}</ProjectGuid>
+    <RootNamespace>BinEdit</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <SDLCheck>true</SDLCheck>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <SpectreMitigation>Spectre</SpectreMitigation>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/utf-8 /guard:ehcont /ZH:SHA_256 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <CETCompat>true</CETCompat>
+      <DataExecutionPrevention>true</DataExecutionPrevention>
+      <RandomizedBaseAddress>true</RandomizedBaseAddress>
+      <HighEntropyVA>true</HighEntropyVA>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dwmapi.lib;advapi32.lib;bcrypt.lib;runtimeobject.lib;uxtheme.lib;comctl32.lib;comdlg32.lib;shell32.lib;shlwapi.lib;windowscodecs.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <SpectreMitigation>Spectre</SpectreMitigation>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/utf-8 /guard:ehcont /ZH:SHA_256 %(AdditionalOptions)</AdditionalOptions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <CETCompat>true</CETCompat>
+      <DataExecutionPrevention>true</DataExecutionPrevention>
+      <RandomizedBaseAddress>true</RandomizedBaseAddress>
+      <HighEntropyVA>true</HighEntropyVA>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dwmapi.lib;advapi32.lib;bcrypt.lib;runtimeobject.lib;uxtheme.lib;comctl32.lib;comdlg32.lib;shell32.lib;shlwapi.lib;windowscodecs.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\AboutDialog.cpp" />
+    <ClCompile Include="src\App.cpp" />
+    <ClCompile Include="src\BitOperations.cpp" />
+    <ClCompile Include="src\BitToolDialog.cpp" />
+    <ClCompile Include="src\ColorMath.cpp" />
+    <ClCompile Include="src\ColorPickerDialog.cpp" />
+    <ClCompile Include="src\DialogSurface.cpp" />
+    <ClCompile Include="src\Document.cpp" />
+    <ClCompile Include="src\Localization.cpp" />
+    <ClCompile Include="src\MessageDialog.cpp" />
+    <ClCompile Include="src\OpenFilesProtocol.cpp" />
+    <ClCompile Include="src\Profile.cpp" />
+    <ClCompile Include="src\RecoveryStore.cpp" />
+    <ClCompile Include="src\Renderer.cpp" />
+    <ClCompile Include="src\SearchDialog.cpp" />
+    <ClCompile Include="src\Security.cpp" />
+    <ClCompile Include="src\ThemeMenu.cpp" />
+    <ClCompile Include="src\main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\AboutDialog.h" />
+    <ClInclude Include="src\App.h" />
+    <ClInclude Include="src\BinEditIdentity.h" />
+    <ClInclude Include="src\BitOperations.h" />
+    <ClInclude Include="src\BitToolDialog.h" />
+    <ClInclude Include="src\ColorMath.h" />
+    <ClInclude Include="src\ColorPickerDialog.h" />
+    <ClInclude Include="src\CommandLineEscaping.h" />
+    <ClInclude Include="src\DialogSurface.h" />
+    <ClInclude Include="src\Document.h" />
+    <ClInclude Include="src\Localization.h" />
+    <ClInclude Include="src\MessageDialog.h" />
+    <ClInclude Include="src\OpenFilesProtocol.h" />
+    <ClInclude Include="src\Profile.h" />
+    <ClInclude Include="src\RecoveryStore.h" />
+    <ClInclude Include="src\Renderer.h" />
+    <ClInclude Include="src\SearchDialog.h" />
+    <ClInclude Include="src\Security.h" />
+    <ClInclude Include="src\TabPolicy.h" />
+    <ClInclude Include="src\ThemeMenu.h" />
+    <ClInclude Include="src\resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\BinEdit.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Manifest Include="src\BinEdit.manifest" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="BinEdit.ico" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

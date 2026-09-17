@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Keeps shared document sources grouped consistently in Solution Explorer. -->
+  <ItemGroup>
+    <Filter Include="Source Files"><UniqueIdentifier>{3EE418C0-9052-41D5-B8B0-53E4549932D8}</UniqueIdentifier></Filter>
+    <Filter Include="Header Files"><UniqueIdentifier>{8D8481DD-A59B-410F-905A-2BD14A087E42}</UniqueIdentifier></Filter>
+    <Filter Include="Test Scripts"><UniqueIdentifier>{5BA278F5-631A-44DA-A2E4-987D034E52E6}</UniqueIdentifier></Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="CoreTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="..\src\BitOperations.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="..\src\ColorMath.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="..\src\Document.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="..\src\BitOperations.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="..\src\ColorMath.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="..\src\CommandLineEscaping.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="..\src\Document.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="..\src\TabPolicy.h"><Filter>Header Files</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="AsyncFileIoUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="EditorUiStress.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="BitToolUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="ExternalChangeUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="MiddleScrollUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="MemoryRegionStressUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="MemoryReleaseUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="RecoveryUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="ScrollBarUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="SearchAsyncUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="TabDockingUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="TabStripScrollUiTests.ps1"><Filter>Test Scripts</Filter></None>
+    <None Include="UntitledCloseUiTests.ps1"><Filter>Test Scripts</Filter></None>
+  </ItemGroup>
+</Project>

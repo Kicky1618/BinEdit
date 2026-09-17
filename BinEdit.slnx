@@ -1,0 +1,8 @@
+<Solution>
+  <!-- Visual Studio 2026 solution: application plus UI-independent core tests. -->
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="BinEdit.vcxproj" Id="9d2af187-37ad-4ab0-8904-b2b7b34e89c6" />
+  <Project Path="tests\BinEdit.Core.Tests.vcxproj" Id="90f6c619-6da1-4672-b918-84f621861f75" />
+</Solution>

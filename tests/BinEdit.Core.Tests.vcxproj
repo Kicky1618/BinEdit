@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Console test runner for UI-independent document, byte-operation, color-math, and tab-policy layers. -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals"><VCProjectVersion>18.0</VCProjectVersion><Keyword>Win32Proj</Keyword><ProjectGuid>{90F6C619-6DA1-4672-B918-84F621861F75}</ProjectGuid><RootNamespace>BinEditCoreTests</RootNamespace><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration"><ConfigurationType>Application</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v145</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration"><ConfigurationType>Application</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v145</PlatformToolset><WholeProgramOptimization>true</WholeProgramOptimization><CharacterSet>Unicode</CharacterSet></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" /><ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets"><Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" /></ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <ItemDefinitionGroup>
+    <ClCompile><WarningLevel>Level4</WarningLevel><DebugInformationFormat>ProgramDatabase</DebugInformationFormat><SDLCheck>true</SDLCheck><ControlFlowGuard>Guard</ControlFlowGuard><SpectreMitigation>Spectre</SpectreMitigation><ConformanceMode>true</ConformanceMode><LanguageStandard>stdcpp20</LanguageStandard><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>BINEDIT_CORE_TESTS;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalOptions>/utf-8 /guard:ehcont /ZH:SHA_256 %(AdditionalOptions)</AdditionalOptions></ClCompile>
+    <Link><SubSystem>Console</SubSystem><ControlFlowGuard>Guard</ControlFlowGuard><CETCompat>true</CETCompat><DataExecutionPrevention>true</DataExecutionPrevention><RandomizedBaseAddress>true</RandomizedBaseAddress><HighEntropyVA>true</HighEntropyVA><AdditionalDependencies>bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="CoreTests.cpp" /><ClCompile Include="..\src\BitOperations.cpp" /><ClCompile Include="..\src\ColorMath.cpp" /><ClCompile Include="..\src\Document.cpp" /></ItemGroup>
+  <ItemGroup><ClInclude Include="..\src\BitOperations.h" /><ClInclude Include="..\src\ColorMath.h" /><ClInclude Include="..\src\CommandLineEscaping.h" /><ClInclude Include="..\src\Document.h" /><ClInclude Include="..\src\TabPolicy.h" /></ItemGroup>
+  <ItemGroup><None Include="AsyncFileIoUiTests.ps1" /><None Include="BitToolUiTests.ps1" /><None Include="EditorUiStress.ps1" /><None Include="ExternalChangeUiTests.ps1" /><None Include="MemoryRegionStressUiTests.ps1" /><None Include="MemoryReleaseUiTests.ps1" /><None Include="MiddleScrollUiTests.ps1" /><None Include="RecoveryUiTests.ps1" /><None Include="ScrollBarUiTests.ps1" /><None Include="SearchAsyncUiTests.ps1" /><None Include="TabDockingUiTests.ps1" /><None Include="TabStripScrollUiTests.ps1" /><None Include="UntitledCloseUiTests.ps1" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" /><ImportGroup Label="ExtensionTargets" />
+</Project>
