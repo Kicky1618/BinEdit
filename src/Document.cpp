@@ -7,6 +7,19 @@
 #include <windows.h>
 #include <bcrypt.h>
 
+// The two-byte literal seed used by FindLiteral is an SSE2 intrinsic. x64 MSVC
+// targets always provide it; other toolchains opt in through __SSE2__.
+#if defined(_M_X64)
+#include <emmintrin.h>
+#include <intrin.h>
+#define BINEDIT_LITERAL_SSE2 1
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+#define BINEDIT_LITERAL_SSE2 1
+#else
+#define BINEDIT_LITERAL_SSE2 0
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -199,13 +212,191 @@ int HexDigit(wchar_t ch) {
     return -1;
 }
 
-bool MatchesAt(std::span<const std::uint8_t> data, const SearchPattern& pattern, std::size_t at) {
+// One maximal run of non-wildcard bytes. offset is the run position inside the
+// complete pattern, so an anchor hit maps directly to a candidate pattern start.
+struct PatternFragment {
+    std::size_t offset{};
+    std::size_t length{};
+};
+
+// Splits a compiled pattern at its wildcard bytes. Every wildcard is exactly one
+// byte, so fragment offsets alone fix each candidate start.
+std::vector<PatternFragment> SplitFragments(const SearchPattern& pattern) {
+    std::vector<PatternFragment> fragments;
+    std::size_t index = 0;
+    while (index < pattern.bytes.size()) {
+        if (pattern.bytes[index].wildcard) { ++index; continue; }
+        const std::size_t begin = index;
+        while (index < pattern.bytes.size() && !pattern.bytes[index].wildcard) ++index;
+        fragments.push_back({begin, index - begin});
+    }
+    return fragments;
+}
+
+// Finds the first literal occurrence at or after start. A two-byte SIMD seed
+// rejects positions roughly 65,536 times faster than a one-byte seed before the
+// remaining literal bytes are compared; memchr covers one-byte literals and the
+// scalar tail.
+std::optional<std::size_t> FindLiteral(std::span<const std::uint8_t> data,
+    std::span<const std::uint8_t> literal, std::size_t start) {
+    if (literal.empty()) return start;
+    if (literal.size() > data.size() || start > data.size() - literal.size()) return std::nullopt;
+    const std::uint8_t* const base = data.data();
+    const std::size_t last = data.size() - literal.size();
+#if BINEDIT_LITERAL_SSE2
+    if (literal.size() >= 2) {
+        const __m128i first = _mm_set1_epi8(static_cast<char>(literal[0]));
+        const __m128i second = _mm_set1_epi8(static_cast<char>(literal[1]));
+        std::size_t at = start;
+        // A 16-byte block needs one extra byte for the shifted second-byte load.
+        while (at + 17 <= data.size()) {
+            const __m128i leading = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base + at));
+            const __m128i trailing = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base + at + 1));
+            unsigned mask = static_cast<unsigned>(_mm_movemask_epi8(
+                _mm_and_si128(_mm_cmpeq_epi8(leading, first), _mm_cmpeq_epi8(trailing, second))));
+            while (mask != 0) {
+#if defined(_M_X64)
+                unsigned long bit = 0;
+                _BitScanForward(&bit, mask);
+                const std::size_t candidate = at + bit;
+#else
+                const std::size_t candidate = at + static_cast<std::size_t>(__builtin_ctz(mask));
+#endif
+                if (candidate <= last &&
+                    std::memcmp(base + candidate + 2, literal.data() + 2, literal.size() - 2) == 0) {
+                    return candidate;
+                }
+                mask &= mask - 1;
+            }
+            at += 16;
+        }
+        for (; at <= last; ++at) {
+            if (base[at] == literal[0] &&
+                std::memcmp(base + at + 1, literal.data() + 1, literal.size() - 1) == 0) {
+                return at;
+            }
+        }
+        return std::nullopt;
+    }
+#endif
+    const std::uint8_t first = literal[0];
+    std::size_t at = start;
+    for (;;) {
+        if (data[at] != first) {
+            const void* found = std::memchr(data.data() + at, first, last - at + 1);
+            if (!found) return std::nullopt;
+            at = static_cast<std::size_t>(static_cast<const std::uint8_t*>(found) - data.data());
+        }
+        if (literal.size() == 1) return at;
+        bool matched = true;
+        if (literal.size() <= 8) {
+            for (std::size_t index = 1; index < literal.size(); ++index) {
+                if (data[at + index] != literal[index]) { matched = false; break; }
+            }
+        } else {
+            matched = std::memcmp(data.data() + at + 1, literal.data() + 1,
+                literal.size() - 1) == 0;
+        }
+        if (matched) return at;
+        if (at == last) return std::nullopt;
+        ++at;
+    }
+}
+
+// Verifies the complete pattern at a candidate start. Anchor hits only skip the
+// positions that cannot match; the remaining fragments decide here.
+bool MatchesAt(std::span<const std::uint8_t> data, const SearchPattern& pattern, std::size_t at,
+    std::stop_token stopToken = {}, bool* canceled = nullptr) {
+    if (canceled) *canceled = false;
     // Subtraction after the explicit at check avoids size_t addition overflow.
     if (at > data.size() || pattern.bytes.size() > data.size() - at) return false;
-    for (std::size_t i = 0; i < pattern.bytes.size(); ++i) {
-        if (!pattern.bytes[i].wildcard && data[at + i] != pattern.bytes[i].value) return false;
+    for (std::size_t index = 0; index < pattern.bytes.size(); ++index) {
+        if ((index & 0xfffu) == 0 && stopToken.stop_requested()) {
+            if (canceled) *canceled = true;
+            return false;
+        }
+        if (!pattern.bytes[index].wildcard && data[at + index] != pattern.bytes[index].value) return false;
     }
     return true;
+}
+
+// Anchor selected for one search: the pattern offset of its first byte and the
+// literal run available from that offset.
+struct PatternAnchor {
+    std::size_t offset{};
+    std::size_t length{};
+};
+
+// Samples byte frequencies from evenly spread positions so anchor selection
+// sees the complete document without copying it.
+std::array<std::uint32_t, 256> SampleByteCounts(std::span<const std::uint8_t> data) {
+    std::array<std::uint32_t, 256> counts{};
+    if (data.empty()) return counts;
+    constexpr std::size_t sampleCount = 4096;
+    const std::size_t samples = std::min<std::size_t>(sampleCount, data.size());
+    for (std::size_t index = 0; index < samples; ++index) {
+        ++counts[data[index * data.size() / samples]];
+    }
+    return counts;
+}
+
+// Samples through spread, non-overlapping copy windows instead of flattening a
+// snapshot. A copy failure keeps the counts gathered so far; the real scan
+// reports the error.
+std::array<std::uint32_t, 256> SampleByteCounts(const ImmutableByteSnapshot& snapshot) {
+    std::array<std::uint32_t, 256> counts{};
+    const std::size_t size = snapshot->Size();
+    if (size == 0) return counts;
+    constexpr std::size_t windowCount = 16;
+    constexpr std::size_t windowSize = 256;
+    constexpr std::size_t sampleLimit = windowCount * windowSize;
+    if (size <= sampleLimit) {
+        std::array<std::uint8_t, sampleLimit> all{};
+        if (!snapshot->CopyRange(0, std::span<std::uint8_t>(all).first(size))) return counts;
+        for (std::size_t index = 0; index < size; ++index) ++counts[all[index]];
+        return counts;
+    }
+    std::array<std::uint8_t, windowSize> window{};
+    const std::size_t span = size / windowCount;
+    for (std::size_t index = 0; index < windowCount; ++index) {
+        if (!snapshot->CopyRange(index * span, window)) break;
+        for (std::size_t position = 0; position < windowSize; ++position) ++counts[window[position]];
+    }
+    return counts;
+}
+
+// Minimizes expected scan work: the rarest sampled byte leads, and longer runs
+// win ties because they reject more candidates per anchor hit.
+PatternAnchor SelectAnchor(const SearchPattern& pattern, const std::vector<PatternFragment>& fragments,
+    const std::array<std::uint32_t, 256>& counts) {
+    PatternAnchor anchor{fragments.front().offset, fragments.front().length};
+    std::uint32_t best = counts[pattern.bytes[anchor.offset].value];
+    for (const PatternFragment& fragment : fragments) {
+        for (std::size_t start = 0; start < fragment.length; ++start) {
+            const PatternAnchor candidate{fragment.offset + start, fragment.length - start};
+            const std::uint32_t count = counts[pattern.bytes[candidate.offset].value];
+            if (count < best || (count == best && candidate.length > anchor.length)) {
+                best = count;
+                anchor = candidate;
+            }
+        }
+    }
+    return anchor;
+}
+
+std::vector<std::uint8_t> AnchorBytes(const SearchPattern& pattern, const PatternAnchor& anchor) {
+    std::vector<std::uint8_t> bytes(anchor.length);
+    for (std::size_t index = 0; index < anchor.length; ++index) {
+        bytes[index] = pattern.bytes[anchor.offset + index].value;
+    }
+    return bytes;
+}
+
+// A hit needs no separate verification only when it covers one complete
+// fragment and every other pattern byte is therefore a wildcard.
+bool AnchorIsComplete(const std::vector<PatternFragment>& fragments, const PatternAnchor& anchor) {
+    return fragments.size() == 1 && anchor.offset == fragments.front().offset &&
+        anchor.length == fragments.front().length;
 }
 }
 
@@ -1237,19 +1428,53 @@ std::optional<SearchPattern> EncodeTextPattern(const std::wstring& text, TextEnc
 }
 
 std::optional<std::size_t> FindPattern(std::span<const std::uint8_t> bytes, const SearchPattern& pattern, std::size_t start) {
-    // The simple linear matcher supports wildcards and performs well for the
-    // short patterns typical of a hex editor without preprocessing allocations.
     if (pattern.bytes.empty() || pattern.bytes.size() > bytes.size() || start > bytes.size() - pattern.bytes.size()) return std::nullopt;
-    for (std::size_t at = start; at <= bytes.size() - pattern.bytes.size(); ++at) if (MatchesAt(bytes, pattern, at)) return at;
-    return std::nullopt;
+    const std::size_t patternLength = pattern.bytes.size();
+    const std::vector<PatternFragment> fragments = SplitFragments(pattern);
+    // A pattern made only of wildcards matches every legal candidate, so the
+    // requested start is already the first match.
+    if (fragments.empty()) return start;
+    const PatternAnchor anchor = SelectAnchor(pattern, fragments, SampleByteCounts(bytes));
+    const std::vector<std::uint8_t> literal = AnchorBytes(pattern, anchor);
+    // A single fragment leaves every other pattern byte unconstrained, so an
+    // anchor hit is already a complete match.
+    const bool verify = !AnchorIsComplete(fragments, anchor);
+    for (std::size_t search = start + anchor.offset;;) {
+        const auto hit = FindLiteral(bytes, literal, search);
+        if (!hit) return std::nullopt;
+        const std::size_t candidate = *hit - anchor.offset;
+        // Hits are ascending, so once the pattern cannot fit, no later hit can
+        // produce a legal candidate either.
+        if (candidate > bytes.size() - patternLength) return std::nullopt;
+        if (!verify || MatchesAt(bytes, pattern, candidate)) return candidate;
+        search = *hit + 1;
+    }
 }
 
 std::vector<std::size_t> FindAllPatterns(std::span<const std::uint8_t> bytes, const SearchPattern& pattern, std::size_t limit) {
-    // Advance by one byte after a match so overlapping patterns are highlighted.
+    // Overlapping matches remain eligible and anchor hits already arrive in
+    // ascending order, so no reordering buffer is required.
     std::vector<std::size_t> found;
-    if (pattern.bytes.empty() || pattern.bytes.size() > bytes.size()) return found;
-    for (std::size_t at = 0; at <= bytes.size() - pattern.bytes.size() && found.size() < limit; ++at) {
-        if (MatchesAt(bytes, pattern, at)) found.push_back(at);
+    if (pattern.bytes.empty() || pattern.bytes.size() > bytes.size() || limit == 0) return found;
+    const std::size_t candidateCount = bytes.size() - pattern.bytes.size() + 1;
+    const std::vector<PatternFragment> fragments = SplitFragments(pattern);
+    if (fragments.empty()) {
+        const std::size_t count = std::min(candidateCount, limit);
+        found.resize(count);
+        for (std::size_t index = 0; index < count; ++index) found[index] = index;
+        return found;
+    }
+    const PatternAnchor anchor = SelectAnchor(pattern, fragments, SampleByteCounts(bytes));
+    const std::vector<std::uint8_t> literal = AnchorBytes(pattern, anchor);
+    const bool verify = !AnchorIsComplete(fragments, anchor);
+    std::size_t search = anchor.offset;
+    while (found.size() < limit) {
+        const auto hit = FindLiteral(bytes, literal, search);
+        if (!hit) break;
+        search = *hit + 1;
+        const std::size_t candidate = *hit - anchor.offset;
+        if (candidate >= candidateCount) break;
+        if (!verify || MatchesAt(bytes, pattern, candidate)) found.push_back(candidate);
     }
     return found;
 }
@@ -1263,6 +1488,24 @@ ParallelSearchResult FindPatternsParallel(ImmutableByteSnapshot snapshot, const 
     }
     const std::size_t byteCount = snapshot->Size();
     if (pattern.bytes.empty() || pattern.bytes.size() > byteCount) return result;
+
+    std::vector<PatternFragment> fragments;
+    std::vector<std::uint8_t> literal;
+    std::size_t anchorOffset = 0;
+    bool verify = false;
+    try {
+        fragments = SplitFragments(pattern);
+        if (!fragments.empty()) {
+            const PatternAnchor anchor =
+                SelectAnchor(pattern, fragments, SampleByteCounts(snapshot));
+            anchorOffset = anchor.offset;
+            literal = AnchorBytes(pattern, anchor);
+            verify = !AnchorIsComplete(fragments, anchor);
+        }
+    } catch (...) {
+        result.failed = true;
+        return result;
+    }
 
     const std::size_t candidateCount = byteCount - pattern.bytes.size() + 1;
     constexpr std::size_t candidatesPerWorker = 256u * 1024u;
@@ -1285,6 +1528,7 @@ ParallelSearchResult FindPatternsParallel(ImmutableByteSnapshot snapshot, const 
     try { partial.resize(result.workerCount); }
     catch (...) { result.failed = true; return result; }
     std::atomic_bool failed{};
+    const bool allWildcards = fragments.empty();
 
     auto scanPartition = [&](unsigned worker) {
         try {
@@ -1293,47 +1537,80 @@ ParallelSearchResult FindPatternsParallel(ImmutableByteSnapshot snapshot, const 
             const std::size_t begin = worker * base + std::min<std::size_t>(worker, remainder);
             const std::size_t end = begin + base + (worker < remainder ? 1u : 0u);
             WorkerResult& local = partial[worker];
-            local.offsets.reserve(std::min(limit, end - begin));
+            const auto record = [&](std::size_t at) {
+                // Anchor hits reach candidates in ascending order, so the first
+                // recorded match is already the partition minimum.
+                if (!local.first) local.first = at;
+                if (!local.forward && at >= start) local.forward = at;
+                if (local.offsets.size() < limit) local.offsets.push_back(at);
+                // Once the smallest highlights, the overall first match, and the
+                // first match at or after start are all fixed, later candidates
+                // cannot change this partition's contribution.
+                return local.offsets.size() >= limit && local.first &&
+                    (local.forward || start >= end);
+            };
+            if (allWildcards) {
+                // No literal fragment exists to anchor the scan; every candidate
+                // matches and only the bounded highlight set matters.
+                for (std::size_t at = begin; at < end; ++at) {
+                    if ((at & 0x3ffu) == 0 && (stopToken.stop_requested() ||
+                        failed.load(std::memory_order_relaxed))) {
+                        local.canceled = true;
+                        return;
+                    }
+                    if (record(at)) return;
+                }
+                return;
+            }
+            // Chunks start small and grow: a dense match set reaches the
+            // highlight cap before a large copy can pay for itself, while a
+            // sparse scan still converges on the maximum chunk size.
             constexpr std::size_t candidatesPerChunk = 1024u * 1024u;
             std::vector<std::uint8_t> chunk;
-            const std::size_t maximumCandidates = std::min(candidatesPerChunk, end - begin);
-            chunk.resize(maximumCandidates + pattern.bytes.size() - 1);
+            std::size_t chunkCapacity = 64u * 1024u;
             for (std::size_t chunkBegin = begin; chunkBegin < end;) {
                 if (stopToken.stop_requested() || failed.load(std::memory_order_relaxed)) {
                     local.canceled = true;
                     return;
                 }
-                const std::size_t chunkCandidates = std::min(candidatesPerChunk, end - chunkBegin);
+                const std::size_t chunkCandidates = std::min(chunkCapacity, end - chunkBegin);
                 const std::size_t chunkBytes = chunkCandidates + pattern.bytes.size() - 1;
+                chunk.resize(chunkBytes);
                 if (!snapshot->CopyRange(chunkBegin,
                     std::span<std::uint8_t>(chunk).first(chunkBytes))) {
                     failed.store(true, std::memory_order_relaxed);
                     return;
                 }
-                for (std::size_t relative = 0; relative < chunkCandidates; ++relative) {
-                    if ((relative & 0x3ffu) == 0 && stopToken.stop_requested()) {
-                        local.canceled = true;
-                        return;
-                    }
-                    bool matches = true;
-                    for (std::size_t index = 0; index < pattern.bytes.size(); ++index) {
-                        if ((index & 0xfffu) == 0 && stopToken.stop_requested()) {
-                            local.canceled = true;
-                            return;
+                const std::span<const std::uint8_t> buffer(chunk.data(), chunkBytes);
+                std::size_t search = anchorOffset;
+                bool done = false;
+                for (;;) {
+                    const auto hit = FindLiteral(buffer, literal, search);
+                    if (!hit) break;
+                    search = *hit + 1;
+                    const std::size_t candidate = chunkBegin + *hit - anchorOffset;
+                    // Lookahead hits can belong to the next partition, and hits
+                    // are ascending, so the first out-of-range candidate ends
+                    // this chunk's work.
+                    if (candidate >= chunkBegin + chunkCandidates) break;
+                    if (verify) {
+                        bool canceled = false;
+                        if (!MatchesAt(buffer, pattern, candidate - chunkBegin, stopToken, &canceled)) {
+                            if (canceled) {
+                                local.canceled = true;
+                                return;
+                            }
+                            continue;
                         }
-                        const PatternByte expected = pattern.bytes[index];
-                        if (!expected.wildcard && chunk[relative + index] != expected.value) {
-                            matches = false;
-                            break;
-                        }
                     }
-                    if (!matches) continue;
-                    const std::size_t at = chunkBegin + relative;
-                    if (!local.first) local.first = at;
-                    if (!local.forward && at >= start) local.forward = at;
-                    if (local.offsets.size() < limit) local.offsets.push_back(at);
+                    if (record(candidate)) {
+                        done = true;
+                        break;
+                    }
                 }
+                if (done) return;
                 chunkBegin += chunkCandidates;
+                chunkCapacity = std::min(candidatesPerChunk, chunkCapacity * 4);
             }
         } catch (...) {
             // Allocation failure in any worker makes the complete result

@@ -4,10 +4,10 @@ param(
 )
 
 # Drives the custom Direct2D search dialog and the real editor HWND. The first
-# phase uses a deliberately expensive all-wildcard pattern to prove that the
-# scan owns multiple worker threads while the UI thread remains responsive. The
-# second phase verifies that asynchronous completion and Find Next select the
-# expected byte by saving a deterministic edit at that position.
+# phase scans a large sparse file with a never-matching anchored pattern to
+# prove that the scan owns multiple worker threads while the UI thread remains
+# responsive. The second phase verifies that asynchronous completion and Find
+# Next select the expected byte by saving a deterministic edit at that position.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -292,16 +292,19 @@ $selectionProcess = $null
 $passed = $false
 
 try {
-    # A sparse zero-filled file keeps fixture setup cheap while 128 wildcard
-    # bytes force enough comparison work to make the worker pool observable.
+    # A sparse zero-filled file keeps fixture setup cheap. The anchor is chosen
+    # from a byte-frequency sample, so a query whose literal bytes are absent
+    # from the file forces a complete scan of every partition and keeps the
+    # worker pool observable until the window is closed. Dense patterns (all
+    # wildcards or frequent anchors) stop once the highlight cap is full.
     $stream = [IO.File]::Open($parallelPath, [IO.FileMode]::Create,
         [IO.FileAccess]::Write, [IO.FileShare]::None)
-    try { $stream.SetLength(64MB) } finally { $stream.Dispose() }
+    try { $stream.SetLength(256MB) } finally { $stream.Dispose() }
     $parallelRun = Start-BinEditFixture $executable $parallelPath
     $parallelProcess = $parallelRun.Process
     [IntPtr]$parallelWindow = $parallelRun.Window
     $baselineThreads = 0
-    $wildcardQuery = ((1..128 | ForEach-Object { '??' }) -join ' ')
+    $wildcardQuery = 'DE AD ?? 00'
     Open-SearchAndSubmit $parallelProcess $parallelWindow $wildcardQuery ([ref]$baselineThreads)
     $maximumWorkers = Wait-MultithreadedSearch $parallelProcess
 
@@ -382,7 +385,7 @@ try {
     [pscustomobject]@{
         Result = 'PASS'
         Configuration = $Configuration
-        SearchFixtureMiB = 64
+        SearchFixtureMiB = 256
         DialogBaselineThreads = $baselineThreads
         NamedWorkersObserved = $maximumWorkers
         MultipleWorkersObserved = $true
