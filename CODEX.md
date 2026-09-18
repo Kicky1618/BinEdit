@@ -50,7 +50,7 @@ $msbuild = 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Curren
 | Area | Files | Responsibility |
 |---|---|---|
 | Process and UI state | `main.cpp`, `App.h/.cpp`, `TabPolicy.h` | Named-mutex startup routing, primary/detached HWND identities, command routing, UI-independent tab-command availability, per-tab state, detach/dock ownership, file workflows, input, and shutdown policy |
-| Document core | `Document.h/.cpp` | Read-only file mapping, persistent piece-table storage, sparse/atomic streaming I/O, external version monitoring, edit history, encoding, and partitioned Aho-Corasick wildcard search |
+| Document core | `Document.h/.cpp` | Read-only file mapping, persistent piece-table storage, sparse/atomic streaming I/O, external version monitoring, edit history, encoding, and partitioned sampled-anchor wildcard search |
 | Main rendering | `Renderer.h/.cpp` | D3D11/D2D1/DirectWrite tab strip, hex view, custom scrollbar, hit testing, and R2PR damage presentation |
 | Modal rendering | `DialogSurface.h/.cpp` | Reusable D3D11/D2D1 swap-chain surface for custom dialogs |
 | Color picker | `ColorPickerDialog.h/.cpp`, `ColorMath.h/.cpp` | Themed HSV/RGB selection, numeric editing, and tested color conversion |

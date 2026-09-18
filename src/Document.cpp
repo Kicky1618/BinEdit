@@ -7,6 +7,19 @@
 #include <windows.h>
 #include <bcrypt.h>
 
+// The two-byte literal seed used by FindLiteral is an SSE2 intrinsic. x64 MSVC
+// targets always provide it; other toolchains opt in through __SSE2__.
+#if defined(_M_X64)
+#include <emmintrin.h>
+#include <intrin.h>
+#define BINEDIT_LITERAL_SSE2 1
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+#define BINEDIT_LITERAL_SSE2 1
+#else
+#define BINEDIT_LITERAL_SSE2 0
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -199,14 +212,105 @@ int HexDigit(wchar_t ch) {
     return -1;
 }
 
+// One maximal run of non-wildcard bytes. offset is the run position inside the
+// complete pattern, so an anchor hit maps directly to a candidate pattern start.
+struct PatternFragment {
+    std::size_t offset{};
+    std::size_t length{};
+};
+
+// Splits a compiled pattern at its wildcard bytes. Every wildcard is exactly one
+// byte, so fragment offsets alone fix each candidate start.
+std::vector<PatternFragment> SplitFragments(const SearchPattern& pattern) {
+    std::vector<PatternFragment> fragments;
+    std::size_t index = 0;
+    while (index < pattern.bytes.size()) {
+        if (pattern.bytes[index].wildcard) { ++index; continue; }
+        const std::size_t begin = index;
+        while (index < pattern.bytes.size() && !pattern.bytes[index].wildcard) ++index;
+        fragments.push_back({begin, index - begin});
+    }
+    return fragments;
+}
+
+// Finds the first literal occurrence at or after start. A two-byte SIMD seed
+// rejects positions roughly 65,536 times faster than a one-byte seed before the
+// remaining literal bytes are compared; memchr covers one-byte literals and the
+// scalar tail.
+std::optional<std::size_t> FindLiteral(std::span<const std::uint8_t> data,
+    std::span<const std::uint8_t> literal, std::size_t start) {
+    if (literal.empty()) return start;
+    if (literal.size() > data.size() || start > data.size() - literal.size()) return std::nullopt;
+    const std::uint8_t* const base = data.data();
+    const std::size_t last = data.size() - literal.size();
+#if BINEDIT_LITERAL_SSE2
+    if (literal.size() >= 2) {
+        const __m128i first = _mm_set1_epi8(static_cast<char>(literal[0]));
+        const __m128i second = _mm_set1_epi8(static_cast<char>(literal[1]));
+        std::size_t at = start;
+        // A 16-byte block needs one extra byte for the shifted second-byte load.
+        while (at + 17 <= data.size()) {
+            const __m128i leading = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base + at));
+            const __m128i trailing = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base + at + 1));
+            unsigned mask = static_cast<unsigned>(_mm_movemask_epi8(
+                _mm_and_si128(_mm_cmpeq_epi8(leading, first), _mm_cmpeq_epi8(trailing, second))));
+            while (mask != 0) {
+#if defined(_M_X64)
+                unsigned long bit = 0;
+                _BitScanForward(&bit, mask);
+                const std::size_t candidate = at + bit;
+#else
+                const std::size_t candidate = at + static_cast<std::size_t>(__builtin_ctz(mask));
+#endif
+                if (candidate <= last &&
+                    std::memcmp(base + candidate + 2, literal.data() + 2, literal.size() - 2) == 0) {
+                    return candidate;
+                }
+                mask &= mask - 1;
+            }
+            at += 16;
+        }
+        for (; at <= last; ++at) {
+            if (base[at] == literal[0] &&
+                std::memcmp(base + at + 1, literal.data() + 1, literal.size() - 1) == 0) {
+                return at;
+            }
+        }
+        return std::nullopt;
+    }
+#endif
+    const std::uint8_t first = literal[0];
+    std::size_t at = start;
+    for (;;) {
+        if (data[at] != first) {
+            const void* found = std::memchr(data.data() + at, first, last - at + 1);
+            if (!found) return std::nullopt;
+            at = static_cast<std::size_t>(static_cast<const std::uint8_t*>(found) - data.data());
+        }
+        if (literal.size() == 1) return at;
+        bool matched = true;
+        if (literal.size() <= 8) {
+            for (std::size_t index = 1; index < literal.size(); ++index) {
+                if (data[at + index] != literal[index]) { matched = false; break; }
+            }
+        } else {
+            matched = std::memcmp(data.data() + at + 1, literal.data() + 1,
+                literal.size() - 1) == 0;
+        }
+        if (matched) return at;
+        if (at == last) return std::nullopt;
+        ++at;
+    }
+}
+
+// Verifies the complete pattern at a candidate start. Anchor hits only skip the
+// positions that cannot match; the remaining fragments decide here.
 bool MatchesAt(std::span<const std::uint8_t> data, const SearchPattern& pattern, std::size_t at,
     std::stop_token stopToken = {}, bool* canceled = nullptr) {
     if (canceled) *canceled = false;
     // Subtraction after the explicit at check avoids size_t addition overflow.
     if (at > data.size() || pattern.bytes.size() > data.size() - at) return false;
     for (std::size_t index = 0; index < pattern.bytes.size(); ++index) {
-        // Verification of a long pattern is itself a long loop, so cancellation
-        // is polled here as well as between candidates.
         if ((index & 0xfffu) == 0 && stopToken.stop_requested()) {
             if (canceled) *canceled = true;
             return false;
@@ -216,211 +320,83 @@ bool MatchesAt(std::span<const std::uint8_t> data, const SearchPattern& pattern,
     return true;
 }
 
-// Aho-Corasick automaton built from the literal runs produced by splitting a
-// search pattern at its wildcard bytes. One linear pass over a candidate window
-// then discovers every fragment occurrence instead of rescanning the complete
-// pattern at every offset. Transitions are sparse linked lists because the byte
-// alphabet is 256 while a pattern introduces only a small number of trie edges.
-class WildcardAutomaton {
-public:
-    static constexpr std::uint32_t kNone = std::numeric_limits<std::uint32_t>::max();
-
-    // One maximal run of non-wildcard bytes. offset is the run position inside
-    // the complete pattern, so a fragment end maps directly to a candidate
-    // pattern start.
-    struct Segment {
-        std::size_t offset{};
-        std::size_t length{};
-    };
-
-    explicit WildcardAutomaton(const SearchPattern& pattern) {
-        std::size_t index = 0;
-        while (index < pattern.bytes.size()) {
-            if (pattern.bytes[index].wildcard) { ++index; continue; }
-            const std::size_t begin = index;
-            while (index < pattern.bytes.size() && !pattern.bytes[index].wildcard) ++index;
-            segments_.push_back({begin, index - begin});
-        }
-        nodes_.emplace_back();
-        outputHead_.push_back(kNone);
-        outputTail_.push_back(kNone);
-        for (std::uint32_t segment = 0; segment < segments_.size(); ++segment) {
-            const Segment& run = segments_[segment];
-            std::uint32_t node = 0;
-            for (std::size_t at = 0; at < run.length; ++at) {
-                const std::uint8_t byte = pattern.bytes[run.offset + at].value;
-                std::uint32_t child = FindChild(node, byte);
-                if (child == kNone) {
-                    child = static_cast<std::uint32_t>(nodes_.size());
-                    nodes_.push_back({});
-                    outputHead_.push_back(kNone);
-                    outputTail_.push_back(kNone);
-                    const std::uint32_t edge = static_cast<std::uint32_t>(edges_.size());
-                    edges_.push_back({byte, child, nodes_[node].firstEdge});
-                    nodes_[node].firstEdge = edge;
-                }
-                node = child;
-            }
-            const std::uint32_t output = static_cast<std::uint32_t>(outputSegment_.size());
-            outputSegment_.push_back(segment);
-            outputNext_.push_back(kNone);
-            if (outputHead_[node] == kNone) outputHead_[node] = output;
-            else outputNext_[outputTail_[node]] = output;
-            outputTail_[node] = output;
-        }
-        BuildFailureLinks();
-    }
-
-    [[nodiscard]] bool Empty() const noexcept { return segments_.empty(); }
-    [[nodiscard]] const Segment& GetSegment(std::uint32_t index) const noexcept { return segments_[index]; }
-    [[nodiscard]] std::uint32_t Root() const noexcept { return 0; }
-
-    // Consumes one byte and returns the deepest trie node matching a suffix of
-    // the text read so far, following failure links as needed.
-    [[nodiscard]] std::uint32_t Step(std::uint32_t state, std::uint8_t byte) const noexcept {
-        while (state != 0 && FindChild(state, byte) == kNone) state = nodes_[state].failure;
-        const std::uint32_t child = FindChild(state, byte);
-        return child == kNone ? 0 : child;
-    }
-
-    // Visits every segment ending at state. Lists already include segments
-    // inherited through failure links, so one visit is exhaustive.
-    template <typename Report>
-    void ForEachOutput(std::uint32_t state, Report&& report) const {
-        for (std::uint32_t output = outputHead_[state]; output != kNone;
-            output = outputNext_[output]) {
-            report(outputSegment_[output]);
-        }
-    }
-
-private:
-    struct Node {
-        std::uint32_t failure{};
-        std::uint32_t firstEdge{kNone};
-    };
-    struct Edge {
-        std::uint8_t byte{};
-        std::uint32_t child{};
-        std::uint32_t next{kNone};
-    };
-
-    [[nodiscard]] std::uint32_t FindChild(std::uint32_t node, std::uint8_t byte) const noexcept {
-        for (std::uint32_t edge = nodes_[node].firstEdge; edge != kNone; edge = edges_[edge].next) {
-            if (edges_[edge].byte == byte) return edges_[edge].child;
-        }
-        return kNone;
-    }
-
-    // Appends failure's already-transitive output list to node's own list.
-    void MergeOutputs(std::uint32_t node, std::uint32_t failure) {
-        if (outputHead_[failure] == kNone) return;
-        if (outputHead_[node] == kNone) {
-            outputHead_[node] = outputHead_[failure];
-            outputTail_[node] = outputTail_[failure];
-            return;
-        }
-        outputNext_[outputTail_[node]] = outputHead_[failure];
-        outputTail_[node] = outputTail_[failure];
-    }
-
-    void BuildFailureLinks() {
-        std::vector<std::uint32_t> breadthFirst;
-        breadthFirst.reserve(nodes_.size());
-        for (std::uint32_t edge = nodes_[0].firstEdge; edge != kNone; edge = edges_[edge].next) {
-            breadthFirst.push_back(edges_[edge].child);
-        }
-        for (std::size_t head = 0; head < breadthFirst.size(); ++head) {
-            const std::uint32_t node = breadthFirst[head];
-            for (std::uint32_t edge = nodes_[node].firstEdge; edge != kNone; edge = edges_[edge].next) {
-                const std::uint8_t byte = edges_[edge].byte;
-                const std::uint32_t child = edges_[edge].child;
-                std::uint32_t failure = nodes_[node].failure;
-                while (failure != 0 && FindChild(failure, byte) == kNone) {
-                    failure = nodes_[failure].failure;
-                }
-                const std::uint32_t target = FindChild(failure, byte);
-                nodes_[child].failure = target == kNone ? 0 : target;
-                // The failure node is shallower and was processed first, so its
-                // output list is already transitively complete.
-                MergeOutputs(child, nodes_[child].failure);
-                breadthFirst.push_back(child);
-            }
-        }
-    }
-
-    std::vector<Node> nodes_;
-    std::vector<Edge> edges_;
-    std::vector<Segment> segments_;
-    std::vector<std::uint32_t> outputHead_;
-    std::vector<std::uint32_t> outputTail_;
-    std::vector<std::uint32_t> outputSegment_;
-    std::vector<std::uint32_t> outputNext_;
+// Anchor selected for one search: the pattern offset of its first byte and the
+// literal run available from that offset.
+struct PatternAnchor {
+    std::size_t offset{};
+    std::size_t length{};
 };
 
-// Retains the smallest offsets seen in any arrival order. Automaton outputs are
-// ordered by fragment end, so the candidate starts belonging to one match can
-// arrive out of ascending order; a bounded max-heap restores display order
-// without ever holding more than limit entries per partition.
-class SmallestOffsets {
-public:
-    explicit SmallestOffsets(std::size_t limit) : limit_(limit) {}
+// Samples byte frequencies from evenly spread positions so anchor selection
+// sees the complete document without copying it.
+std::array<std::uint32_t, 256> SampleByteCounts(std::span<const std::uint8_t> data) {
+    std::array<std::uint32_t, 256> counts{};
+    if (data.empty()) return counts;
+    constexpr std::size_t sampleCount = 4096;
+    const std::size_t samples = std::min<std::size_t>(sampleCount, data.size());
+    for (std::size_t index = 0; index < samples; ++index) {
+        ++counts[data[index * data.size() / samples]];
+    }
+    return counts;
+}
 
-    void Add(std::size_t offset) {
-        if (heap_.size() < limit_) {
-            heap_.push_back(offset);
-            std::push_heap(heap_.begin(), heap_.end());
-        } else if (limit_ != 0 && offset < heap_.front()) {
-            std::pop_heap(heap_.begin(), heap_.end());
-            heap_.back() = offset;
-            std::push_heap(heap_.begin(), heap_.end());
+// Samples through spread, non-overlapping copy windows instead of flattening a
+// snapshot. A copy failure keeps the counts gathered so far; the real scan
+// reports the error.
+std::array<std::uint32_t, 256> SampleByteCounts(const ImmutableByteSnapshot& snapshot) {
+    std::array<std::uint32_t, 256> counts{};
+    const std::size_t size = snapshot->Size();
+    if (size == 0) return counts;
+    constexpr std::size_t windowCount = 16;
+    constexpr std::size_t windowSize = 256;
+    constexpr std::size_t sampleLimit = windowCount * windowSize;
+    if (size <= sampleLimit) {
+        std::array<std::uint8_t, sampleLimit> all{};
+        if (!snapshot->CopyRange(0, std::span<std::uint8_t>(all).first(size))) return counts;
+        for (std::size_t index = 0; index < size; ++index) ++counts[all[index]];
+        return counts;
+    }
+    std::array<std::uint8_t, windowSize> window{};
+    const std::size_t span = size / windowCount;
+    for (std::size_t index = 0; index < windowCount; ++index) {
+        if (!snapshot->CopyRange(index * span, window)) break;
+        for (std::size_t position = 0; position < windowSize; ++position) ++counts[window[position]];
+    }
+    return counts;
+}
+
+// Minimizes expected scan work: the rarest sampled byte leads, and longer runs
+// win ties because they reject more candidates per anchor hit.
+PatternAnchor SelectAnchor(const SearchPattern& pattern, const std::vector<PatternFragment>& fragments,
+    const std::array<std::uint32_t, 256>& counts) {
+    PatternAnchor anchor{fragments.front().offset, fragments.front().length};
+    std::uint32_t best = counts[pattern.bytes[anchor.offset].value];
+    for (const PatternFragment& fragment : fragments) {
+        for (std::size_t start = 0; start < fragment.length; ++start) {
+            const PatternAnchor candidate{fragment.offset + start, fragment.length - start};
+            const std::uint32_t count = counts[pattern.bytes[candidate.offset].value];
+            if (count < best || (count == best && candidate.length > anchor.length)) {
+                best = count;
+                anchor = candidate;
+            }
         }
     }
+    return anchor;
+}
 
-    [[nodiscard]] std::vector<std::size_t> TakeSorted() {
-        std::sort_heap(heap_.begin(), heap_.end());
-        return std::move(heap_);
+std::vector<std::uint8_t> AnchorBytes(const SearchPattern& pattern, const PatternAnchor& anchor) {
+    std::vector<std::uint8_t> bytes(anchor.length);
+    for (std::size_t index = 0; index < anchor.length; ++index) {
+        bytes[index] = pattern.bytes[anchor.offset + index].value;
     }
+    return bytes;
+}
 
-private:
-    std::vector<std::size_t> heap_;
-    std::size_t limit_{};
-};
-
-// Scans one bounded window through the automaton and reports every matching
-// pattern start in [begin, end) exactly once. buffer starts at document offset
-// bufferOffset and must cover every candidate byte in the range; verified holds
-// ceil((end - begin) / 8) zeroed bytes and suppresses duplicate verification
-// when several fragments of the same match hit the same candidate. Returns
-// false when stopToken requested cancellation.
-template <typename Report>
-bool ScanCandidateWindow(std::span<const std::uint8_t> buffer, std::size_t bufferOffset,
-    const SearchPattern& pattern, const WildcardAutomaton& automaton,
-    std::size_t begin, std::size_t end, std::span<std::uint8_t> verified,
-    std::stop_token stopToken, Report&& report) {
-    std::uint32_t state = automaton.Root();
-    for (std::size_t position = 0; position < buffer.size(); ++position) {
-        if ((position & 0x3ffu) == 0 && stopToken.stop_requested()) return false;
-        state = automaton.Step(state, buffer[position]);
-        bool canceled = false;
-        automaton.ForEachOutput(state, [&](std::uint32_t segmentIndex) {
-            if (canceled) return;
-            const WildcardAutomaton::Segment& segment = automaton.GetSegment(segmentIndex);
-            if (position + 1 < segment.length) return;
-            const std::size_t segmentStart = position + 1 - segment.length;
-            if (segmentStart < segment.offset) return;
-            const std::size_t candidate = bufferOffset + segmentStart - segment.offset;
-            if (candidate < begin || candidate >= end) return;
-            const std::size_t relative = candidate - begin;
-            const std::uint8_t mask = static_cast<std::uint8_t>(1u << (relative & 7u));
-            if ((verified[relative >> 3] & mask) != 0) return;
-            verified[relative >> 3] |= mask;
-            if (MatchesAt(buffer, pattern, candidate - bufferOffset, stopToken, &canceled)) {
-                report(candidate);
-            }
-        });
-        if (canceled) return false;
-    }
-    return true;
+// A hit needs no separate verification only when it covers one complete
+// fragment and every other pattern byte is therefore a wildcard.
+bool AnchorIsComplete(const std::vector<PatternFragment>& fragments, const PatternAnchor& anchor) {
+    return fragments.size() == 1 && anchor.offset == fragments.front().offset &&
+        anchor.length == fragments.front().length;
 }
 }
 
@@ -1453,65 +1429,54 @@ std::optional<SearchPattern> EncodeTextPattern(const std::wstring& text, TextEnc
 
 std::optional<std::size_t> FindPattern(std::span<const std::uint8_t> bytes, const SearchPattern& pattern, std::size_t start) {
     if (pattern.bytes.empty() || pattern.bytes.size() > bytes.size() || start > bytes.size() - pattern.bytes.size()) return std::nullopt;
-    WildcardAutomaton automaton(pattern);
+    const std::size_t patternLength = pattern.bytes.size();
+    const std::vector<PatternFragment> fragments = SplitFragments(pattern);
     // A pattern made only of wildcards matches every legal candidate, so the
     // requested start is already the first match.
-    if (automaton.Empty()) return start;
-    const std::size_t candidateCount = bytes.size() - pattern.bytes.size() + 1;
-    // A match discovered anywhere in a window may still be preceded by a
-    // smaller candidate from a later fragment hit, so only the window itself is
-    // abandoned once a match exists. A small window keeps that redundant scan
-    // and the dedupe bitmap cache-resident close to Find Next call sites.
-    constexpr std::size_t candidatesPerWindow = 4096u;
-    std::vector<std::uint8_t> verified((candidatesPerWindow + 7u) / 8u);
-    for (std::size_t windowBegin = start; windowBegin < candidateCount;) {
-        const std::size_t windowCandidates = std::min(candidatesPerWindow, candidateCount - windowBegin);
-        const std::size_t windowBytes = windowCandidates + pattern.bytes.size() - 1;
-        const std::size_t verifiedBytes = (windowCandidates + 7u) / 8u;
-        std::fill_n(verified.begin(), verifiedBytes, std::uint8_t{0});
-        std::optional<std::size_t> best;
-        const auto buffer = bytes.subspan(windowBegin, windowBytes);
-        static_cast<void>(ScanCandidateWindow(buffer, windowBegin, pattern, automaton,
-            windowBegin, windowBegin + windowCandidates,
-            std::span<std::uint8_t>(verified).first(verifiedBytes), {},
-            [&](std::size_t candidate) {
-                if (!best || candidate < *best) best = candidate;
-            }));
-        if (best) return best;
-        windowBegin += windowCandidates;
+    if (fragments.empty()) return start;
+    const PatternAnchor anchor = SelectAnchor(pattern, fragments, SampleByteCounts(bytes));
+    const std::vector<std::uint8_t> literal = AnchorBytes(pattern, anchor);
+    // A single fragment leaves every other pattern byte unconstrained, so an
+    // anchor hit is already a complete match.
+    const bool verify = !AnchorIsComplete(fragments, anchor);
+    for (std::size_t search = start + anchor.offset;;) {
+        const auto hit = FindLiteral(bytes, literal, search);
+        if (!hit) return std::nullopt;
+        const std::size_t candidate = *hit - anchor.offset;
+        // Hits are ascending, so once the pattern cannot fit, no later hit can
+        // produce a legal candidate either.
+        if (candidate > bytes.size() - patternLength) return std::nullopt;
+        if (!verify || MatchesAt(bytes, pattern, candidate)) return candidate;
+        search = *hit + 1;
     }
-    return std::nullopt;
 }
 
 std::vector<std::size_t> FindAllPatterns(std::span<const std::uint8_t> bytes, const SearchPattern& pattern, std::size_t limit) {
-    // Overlapping matches remain eligible; the bounded collector returns them
-    // in ascending order even though fragment hits arrive by fragment end.
+    // Overlapping matches remain eligible and anchor hits already arrive in
+    // ascending order, so no reordering buffer is required.
     std::vector<std::size_t> found;
     if (pattern.bytes.empty() || pattern.bytes.size() > bytes.size() || limit == 0) return found;
     const std::size_t candidateCount = bytes.size() - pattern.bytes.size() + 1;
-    WildcardAutomaton automaton(pattern);
-    if (automaton.Empty()) {
+    const std::vector<PatternFragment> fragments = SplitFragments(pattern);
+    if (fragments.empty()) {
         const std::size_t count = std::min(candidateCount, limit);
         found.resize(count);
         for (std::size_t index = 0; index < count; ++index) found[index] = index;
         return found;
     }
-    constexpr std::size_t candidatesPerWindow = 1024u * 1024u;
-    std::vector<std::uint8_t> verified((candidatesPerWindow + 7u) / 8u);
-    SmallestOffsets smallest(limit);
-    for (std::size_t windowBegin = 0; windowBegin < candidateCount;) {
-        const std::size_t windowCandidates = std::min(candidatesPerWindow, candidateCount - windowBegin);
-        const std::size_t windowBytes = windowCandidates + pattern.bytes.size() - 1;
-        const std::size_t verifiedBytes = (windowCandidates + 7u) / 8u;
-        std::fill_n(verified.begin(), verifiedBytes, std::uint8_t{0});
-        const auto buffer = bytes.subspan(windowBegin, windowBytes);
-        static_cast<void>(ScanCandidateWindow(buffer, windowBegin, pattern, automaton,
-            windowBegin, windowBegin + windowCandidates,
-            std::span<std::uint8_t>(verified).first(verifiedBytes), {},
-            [&](std::size_t candidate) { smallest.Add(candidate); }));
-        windowBegin += windowCandidates;
+    const PatternAnchor anchor = SelectAnchor(pattern, fragments, SampleByteCounts(bytes));
+    const std::vector<std::uint8_t> literal = AnchorBytes(pattern, anchor);
+    const bool verify = !AnchorIsComplete(fragments, anchor);
+    std::size_t search = anchor.offset;
+    while (found.size() < limit) {
+        const auto hit = FindLiteral(bytes, literal, search);
+        if (!hit) break;
+        search = *hit + 1;
+        const std::size_t candidate = *hit - anchor.offset;
+        if (candidate >= candidateCount) break;
+        if (!verify || MatchesAt(bytes, pattern, candidate)) found.push_back(candidate);
     }
-    return smallest.TakeSorted();
+    return found;
 }
 
 ParallelSearchResult FindPatternsParallel(ImmutableByteSnapshot snapshot, const SearchPattern& pattern,
@@ -1524,9 +1489,19 @@ ParallelSearchResult FindPatternsParallel(ImmutableByteSnapshot snapshot, const 
     const std::size_t byteCount = snapshot->Size();
     if (pattern.bytes.empty() || pattern.bytes.size() > byteCount) return result;
 
-    std::optional<WildcardAutomaton> automaton;
+    std::vector<PatternFragment> fragments;
+    std::vector<std::uint8_t> literal;
+    std::size_t anchorOffset = 0;
+    bool verify = false;
     try {
-        automaton.emplace(pattern);
+        fragments = SplitFragments(pattern);
+        if (!fragments.empty()) {
+            const PatternAnchor anchor =
+                SelectAnchor(pattern, fragments, SampleByteCounts(snapshot));
+            anchorOffset = anchor.offset;
+            literal = AnchorBytes(pattern, anchor);
+            verify = !AnchorIsComplete(fragments, anchor);
+        }
     } catch (...) {
         result.failed = true;
         return result;
@@ -1553,7 +1528,7 @@ ParallelSearchResult FindPatternsParallel(ImmutableByteSnapshot snapshot, const 
     try { partial.resize(result.workerCount); }
     catch (...) { result.failed = true; return result; }
     std::atomic_bool failed{};
-    const bool allWildcards = automaton->Empty();
+    const bool allWildcards = fragments.empty();
 
     auto scanPartition = [&](unsigned worker) {
         try {
@@ -1562,57 +1537,81 @@ ParallelSearchResult FindPatternsParallel(ImmutableByteSnapshot snapshot, const 
             const std::size_t begin = worker * base + std::min<std::size_t>(worker, remainder);
             const std::size_t end = begin + base + (worker < remainder ? 1u : 0u);
             WorkerResult& local = partial[worker];
-            SmallestOffsets smallest(limit);
             const auto record = [&](std::size_t at) {
-                // Fragment order is not candidate order, so both Find Next
-                // markers keep their exact minimum semantics.
-                if (!local.first || at < *local.first) local.first = at;
-                if (at >= start && (!local.forward || at < *local.forward)) local.forward = at;
-                smallest.Add(at);
+                // Anchor hits reach candidates in ascending order, so the first
+                // recorded match is already the partition minimum.
+                if (!local.first) local.first = at;
+                if (!local.forward && at >= start) local.forward = at;
+                if (local.offsets.size() < limit) local.offsets.push_back(at);
+                // Once the smallest highlights, the overall first match, and the
+                // first match at or after start are all fixed, later candidates
+                // cannot change this partition's contribution.
+                return local.offsets.size() >= limit && local.first &&
+                    (local.forward || start >= end);
             };
             if (allWildcards) {
-                // No literal fragment exists to anchor the automaton; every
-                // candidate matches and only the bounded highlight set matters.
+                // No literal fragment exists to anchor the scan; every candidate
+                // matches and only the bounded highlight set matters.
                 for (std::size_t at = begin; at < end; ++at) {
                     if ((at & 0x3ffu) == 0 && (stopToken.stop_requested() ||
                         failed.load(std::memory_order_relaxed))) {
                         local.canceled = true;
                         return;
                     }
-                    record(at);
+                    if (record(at)) return;
                 }
-                local.offsets = smallest.TakeSorted();
                 return;
             }
+            // Chunks start small and grow: a dense match set reaches the
+            // highlight cap before a large copy can pay for itself, while a
+            // sparse scan still converges on the maximum chunk size.
             constexpr std::size_t candidatesPerChunk = 1024u * 1024u;
             std::vector<std::uint8_t> chunk;
-            std::vector<std::uint8_t> verified;
-            const std::size_t maximumCandidates = std::min(candidatesPerChunk, end - begin);
-            chunk.resize(maximumCandidates + pattern.bytes.size() - 1);
-            verified.resize((maximumCandidates + 7u) / 8u);
+            std::size_t chunkCapacity = 64u * 1024u;
             for (std::size_t chunkBegin = begin; chunkBegin < end;) {
                 if (stopToken.stop_requested() || failed.load(std::memory_order_relaxed)) {
                     local.canceled = true;
                     return;
                 }
-                const std::size_t chunkCandidates = std::min(candidatesPerChunk, end - chunkBegin);
+                const std::size_t chunkCandidates = std::min(chunkCapacity, end - chunkBegin);
                 const std::size_t chunkBytes = chunkCandidates + pattern.bytes.size() - 1;
+                chunk.resize(chunkBytes);
                 if (!snapshot->CopyRange(chunkBegin,
                     std::span<std::uint8_t>(chunk).first(chunkBytes))) {
                     failed.store(true, std::memory_order_relaxed);
                     return;
                 }
-                const std::size_t verifiedBytes = (chunkCandidates + 7u) / 8u;
-                std::fill_n(verified.begin(), verifiedBytes, std::uint8_t{0});
-                if (!ScanCandidateWindow(std::span<const std::uint8_t>(chunk).first(chunkBytes),
-                    chunkBegin, pattern, *automaton, chunkBegin, chunkBegin + chunkCandidates,
-                    std::span<std::uint8_t>(verified).first(verifiedBytes), stopToken, record)) {
-                    local.canceled = true;
-                    return;
+                const std::span<const std::uint8_t> buffer(chunk.data(), chunkBytes);
+                std::size_t search = anchorOffset;
+                bool done = false;
+                for (;;) {
+                    const auto hit = FindLiteral(buffer, literal, search);
+                    if (!hit) break;
+                    search = *hit + 1;
+                    const std::size_t candidate = chunkBegin + *hit - anchorOffset;
+                    // Lookahead hits can belong to the next partition, and hits
+                    // are ascending, so the first out-of-range candidate ends
+                    // this chunk's work.
+                    if (candidate >= chunkBegin + chunkCandidates) break;
+                    if (verify) {
+                        bool canceled = false;
+                        if (!MatchesAt(buffer, pattern, candidate - chunkBegin, stopToken, &canceled)) {
+                            if (canceled) {
+                                local.canceled = true;
+                                return;
+                            }
+                            continue;
+                        }
+                    }
+                    if (record(candidate)) {
+                        done = true;
+                        break;
+                    }
                 }
+                if (done) return;
                 chunkBegin += chunkCandidates;
+                chunkCapacity = std::min(candidatesPerChunk, chunkCapacity * 4);
             }
-            local.offsets = smallest.TakeSorted();
         } catch (...) {
             // Allocation failure in any worker makes the complete result
             // unusable. Other partitions observe failed and exit promptly.

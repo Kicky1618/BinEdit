@@ -277,8 +277,10 @@ std::optional<SearchPattern> ParseBinaryPattern(const std::wstring& text, Search
 // target bytes different from the text entered by the user.
 std::optional<SearchPattern> EncodeTextPattern(const std::wstring& text, TextEncoding encoding, SearchPatternError& error);
 // Finds the first match at or after start. Inputs are borrowed and never
-// copied. The pattern is split at wildcard bytes into literal fragments, which
-// one Aho-Corasick pass per bounded window matches together.
+// copied. Wildcard bytes split the pattern into literal fragments; the rarest
+// sampled byte anchors a two-byte SIMD literal scan and the remaining fragments
+// verify each candidate. A pattern with no literal fragment matches every legal
+// offset.
 std::optional<std::size_t> FindPattern(std::span<const std::uint8_t> bytes, const SearchPattern& pattern, std::size_t start);
 // Collects overlapping highlights in ascending order, capped at limit to bound
 // memory and per-frame lookup cost.

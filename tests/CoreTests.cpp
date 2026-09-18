@@ -141,8 +141,8 @@ int wmain() {
     Check(binary && FindPattern(initialDocumentBytes, *binary, 0) == 0, L"binary wildcard search");
     Check(!ParseBinaryPattern(L"4D ZZ", parseError), L"invalid binary rejected");
 
-    // The Aho-Corasick matcher must reconstruct a candidate from a fragment
-    // that does not start at pattern offset zero.
+    // The anchored matcher must reconstruct a candidate from a fragment that
+    // does not start at pattern offset zero.
     auto leadingWildcard = ParseBinaryPattern(L"?? 5A ?? 00", parseError);
     Check(leadingWildcard && FindPattern(initialDocumentBytes, *leadingWildcard, 0) == 0,
         L"leading wildcard fragment search");
@@ -264,8 +264,8 @@ int wmain() {
         parallelByteCount, 100u, {}, 4u);
     Check(wrappedResult.next == parallelExpected.front(), L"parallel find-next wrap");
 
-    // A multi-fragment pattern must reconstruct candidates from the Aho-Corasick
-    // fragment ends that do not line up with the pattern start.
+    // A multi-fragment pattern must reconstruct candidates from anchor hits
+    // that do not line up with the pattern start.
     auto segmentedParallelPattern = ParseBinaryPattern(L"DE ?? 55", parseError);
     Check(segmentedParallelPattern.has_value(), L"parallel multi-segment parse");
     auto segmentedParallel = FindPatternsParallel(parallelSnapshot, *segmentedParallelPattern,
