@@ -141,6 +141,36 @@ int wmain() {
     Check(binary && FindPattern(initialDocumentBytes, *binary, 0) == 0, L"binary wildcard search");
     Check(!ParseBinaryPattern(L"4D ZZ", parseError), L"invalid binary rejected");
 
+    // The Aho-Corasick matcher must reconstruct a candidate from a fragment
+    // that does not start at pattern offset zero.
+    auto leadingWildcard = ParseBinaryPattern(L"?? 5A ?? 00", parseError);
+    Check(leadingWildcard && FindPattern(initialDocumentBytes, *leadingWildcard, 0) == 0,
+        L"leading wildcard fragment search");
+    auto multiSegment = ParseBinaryPattern(L"4D ?? 7F ?? 41", parseError);
+    Check(multiSegment && FindPattern(initialDocumentBytes, *multiSegment, 0) == 0,
+        L"multi-segment wildcard search");
+
+    // A fully wildcarded pattern has no fragment to anchor; every legal offset
+    // matches and the concrete start selects the first result.
+    auto allWildcard = ParseBinaryPattern(L"?? ??", parseError);
+    Check(allWildcard && FindPattern(initialDocumentBytes, *allWildcard, 3) == 3,
+        L"all-wildcard find start");
+    const std::vector<std::size_t> allWildcardMatches = allWildcard ?
+        FindAllPatterns(initialDocumentBytes, *allWildcard, 100) : std::vector<std::size_t>{};
+    Check(allWildcard && allWildcardMatches.size() == initialDocumentBytes.size() - 1 &&
+        allWildcardMatches.front() == 0 &&
+        allWildcardMatches.back() == initialDocumentBytes.size() - 2,
+        L"all-wildcard enumeration");
+
+    SearchPattern segmentedPattern;
+    segmentedPattern.bytes = {{0x11, false}, {0, true}, {0x22, false}};
+    const std::vector<std::uint8_t> segmentedBytes{
+        0x11, 0x00, 0x22, 0x11, 0xAA, 0x22, 0x11, 0x00, 0x22};
+    Check(FindAllPatterns(segmentedBytes, segmentedPattern, 100) ==
+        std::vector<std::size_t>({0, 3, 6}), L"overlapping segmented enumeration");
+    Check(FindAllPatterns(segmentedBytes, segmentedPattern, 2) ==
+        std::vector<std::size_t>({0, 3}), L"segmented enumeration respects cap");
+
     auto utf8 = EncodeTextPattern(L"日本", TextEncoding::Utf8, parseError);
     Check(utf8.has_value() && utf8->bytes.size() == 6, L"UTF-8 encoding");
     auto utf16 = EncodeTextPattern(L"A", TextEncoding::Utf16Le, parseError);
@@ -234,6 +264,16 @@ int wmain() {
         parallelByteCount, 100u, {}, 4u);
     Check(wrappedResult.next == parallelExpected.front(), L"parallel find-next wrap");
 
+    // A multi-fragment pattern must reconstruct candidates from the Aho-Corasick
+    // fragment ends that do not line up with the pattern start.
+    auto segmentedParallelPattern = ParseBinaryPattern(L"DE ?? 55", parseError);
+    Check(segmentedParallelPattern.has_value(), L"parallel multi-segment parse");
+    auto segmentedParallel = FindPatternsParallel(parallelSnapshot, *segmentedParallelPattern,
+        0u, 100u, {}, 4u);
+    Check(segmentedParallel.offsets == parallelExpected &&
+        segmentedParallel.next == parallelExpected.front(),
+        L"parallel multi-segment wildcard search");
+
     SearchPattern overlappingPattern;
     overlappingPattern.bytes = {{0xAA, false}, {0xAA, false}};
     std::vector<std::uint8_t> overlappingBytes(300000u, 0xAA);
@@ -244,6 +284,17 @@ int wmain() {
     Check(cappedResult.offsets.size() == 100 && cappedResult.offsets.front() == 0 &&
         cappedResult.offsets.back() == 99, L"parallel highlight cap remains globally ordered");
     Check(cappedResult.next == 250000u, L"find-next remains exact beyond highlight cap");
+
+    // A pattern with no literal fragment matches every candidate; the parallel
+    // collector must still cap highlights and preserve Find Next.
+    SearchPattern allWildcardPattern;
+    allWildcardPattern.bytes = {{0, true}, {0, true}};
+    auto allWildcardParallel = FindPatternsParallel(overlappingSnapshot, allWildcardPattern,
+        123u, 4u, {}, 4u);
+    Check(allWildcardParallel.offsets == std::vector<std::size_t>({0, 1, 2, 3}) &&
+        allWildcardParallel.next == 123u,
+        L"parallel all-wildcard candidates");
+
     std::stop_source canceledSearch;
     canceledSearch.request_stop();
     Check(FindPatternsParallel(parallelSnapshot, *parallelPattern, 0, 100u,

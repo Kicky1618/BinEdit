@@ -4,7 +4,7 @@ param(
 )
 
 # Drives the custom Direct2D search dialog and the real editor HWND. The first
-# phase uses a deliberately expensive all-wildcard pattern to prove that the
+# phase uses a deliberately expensive multi-fragment pattern to prove that the
 # scan owns multiple worker threads while the UI thread remains responsive. The
 # second phase verifies that asynchronous completion and Find Next select the
 # expected byte by saving a deterministic edit at that position.
@@ -292,8 +292,10 @@ $selectionProcess = $null
 $passed = $false
 
 try {
-    # A sparse zero-filled file keeps fixture setup cheap while 128 wildcard
-    # bytes force enough comparison work to make the worker pool observable.
+    # A sparse zero-filled file keeps fixture setup cheap while a 128-byte
+    # pattern alternating literal and wildcard bytes keeps every candidate
+    # requiring full-pattern fragment verification, so the worker pool stays
+    # observable. A pure wildcard pattern would be answered without scanning.
     $stream = [IO.File]::Open($parallelPath, [IO.FileMode]::Create,
         [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $stream.SetLength(64MB) } finally { $stream.Dispose() }
@@ -301,7 +303,7 @@ try {
     $parallelProcess = $parallelRun.Process
     [IntPtr]$parallelWindow = $parallelRun.Window
     $baselineThreads = 0
-    $wildcardQuery = ((1..128 | ForEach-Object { '??' }) -join ' ')
+    $wildcardQuery = ((1..64 | ForEach-Object { '00 ??' }) -join ' ')
     Open-SearchAndSubmit $parallelProcess $parallelWindow $wildcardQuery ([ref]$baselineThreads)
     $maximumWorkers = Wait-MultithreadedSearch $parallelProcess
 
